@@ -24,3 +24,4 @@ output/
 
 # Config with secrets
 config.local.json
+firmware/crosspoint-reader
