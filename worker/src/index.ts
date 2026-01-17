@@ -72,12 +72,32 @@ const WMO_CODES: { [key: number]: string } = {
   99: 'Severe Thunderstorm',
 };
 
+// Cache key for weather data
+const WEATHER_CACHE_KEY = 'https://crosspoint-calendar.internal/weather-cache';
+const WEATHER_CACHE_TTL = 15 * 60; // 15 minutes in seconds
+const WEATHER_ERROR_CACHE_TTL = 5 * 60; // 5 minutes for errors (backoff)
+
 async function fetchWeather(): Promise<WeatherData> {
+  // Try to get from cache first
+  const cache = caches.default;
+  const cachedResponse = await cache.match(WEATHER_CACHE_KEY);
+
+  if (cachedResponse) {
+    const cached = await cachedResponse.json() as WeatherData;
+    console.log('Using cached weather data');
+    return cached;
+  }
+
   try {
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${BROOKLYN_LAT}&longitude=${BROOKLYN_LON}&current=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min&temperature_unit=fahrenheit&timezone=${encodeURIComponent(TIMEZONE)}&forecast_days=1`;
 
-    const response = await fetch(url);
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'CrossPointCalendar/1.0 (e-ink display; https://github.com/ckorhonen/crosspoint-calendar)',
+      },
+    });
     if (!response.ok) {
+      console.error(`Weather API HTTP error: ${response.status} ${response.statusText}`);
       throw new Error(`Weather API error: ${response.status}`);
     }
 
@@ -86,22 +106,47 @@ async function fetchWeather(): Promise<WeatherData> {
       daily: { temperature_2m_max: number[]; temperature_2m_min: number[] };
     };
 
-    return {
+    const weatherData: WeatherData = {
       temperature: Math.round(data.current.temperature_2m),
       temperatureHigh: Math.round(data.daily.temperature_2m_max[0]),
       temperatureLow: Math.round(data.daily.temperature_2m_min[0]),
       condition: WMO_CODES[data.current.weather_code] || 'Unknown',
       conditionCode: data.current.weather_code,
     };
+
+    // Cache the weather data
+    const cacheResponse = new Response(JSON.stringify(weatherData), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': `public, max-age=${WEATHER_CACHE_TTL}`,
+      },
+    });
+    await cache.put(WEATHER_CACHE_KEY, cacheResponse);
+    console.log('Cached fresh weather data');
+
+    return weatherData;
   } catch (error) {
     console.error('Weather fetch error:', error);
-    return {
+
+    // Cache the error state to prevent hammering the API
+    const errorData: WeatherData = {
       temperature: 0,
       temperatureHigh: 0,
       temperatureLow: 0,
       condition: 'Unavailable',
       conditionCode: -1,
     };
+
+    const errorCacheResponse = new Response(JSON.stringify(errorData), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': `public, max-age=${WEATHER_ERROR_CACHE_TTL}`,
+      },
+    });
+    await cache.put(WEATHER_CACHE_KEY, errorCacheResponse);
+    console.log('Cached error state for backoff');
+
+    return errorData;
   }
 }
 
@@ -520,6 +565,15 @@ function drawWeatherIcon(pixels: Uint8Array, width: number, x: number, y: number
       pixels[py * width + px] = INK_BLACK;
       pixels[py * width + px + 1] = INK_BLACK;
     }
+  } else if (code === -1) {
+    // Error/Unavailable - X mark
+    for (let i = 0; i < 24; i++) {
+      const px1 = x + 12 + i;
+      const py1 = y + 12 + i;
+      const px2 = x + 36 - i;
+      if (px1 >= 0 && px1 < width && py1 >= 0) pixels[py1 * width + px1] = DARK_GRAY;
+      if (px2 >= 0 && px2 < width && py1 >= 0) pixels[py1 * width + px2] = DARK_GRAY;
+    }
   } else {
     // Unknown - question mark
     drawText(pixels, width, x + 16, y + 16, '?', INK_BLACK, 3);
@@ -589,21 +643,24 @@ function renderDisplay(
   const tempWidth = getTextWidth(tempStr, 10);
   drawText(pixels, width, MARGIN + tempWidth, 30, '°', INK_BLACK, 4);
 
-  // Right side: location, condition, hi/lo
-  const rightX = 240;
+  // Right side: weather icon + details (right-aligned within margin)
+  const rightMargin = width - MARGIN;
+  const iconSize = 48;
+  const textStartX = rightMargin - 140; // Leave room for text
 
-  // Weather icon
-  drawWeatherIcon(pixels, width, rightX, 20, weather.conditionCode);
+  // Weather icon (to the left of text)
+  drawWeatherIcon(pixels, width, textStartX - iconSize - 8, 20, weather.conditionCode);
 
-  // Location
-  drawText(pixels, width, rightX + 56, 28, 'BROOKLYN NY', INK_BLACK, 2);
+  // Location (right-aligned)
+  drawRightAlignedText(pixels, width, 28, 'BROOKLYN NY', INK_BLACK, 2, MARGIN);
 
-  // Condition
-  drawText(pixels, width, rightX + 56, 60, weather.condition, DARK_GRAY, 2);
+  // Condition (right-aligned, truncate if needed)
+  const conditionText = weather.condition.length > 12 ? weather.condition.slice(0, 11) + '.' : weather.condition;
+  drawRightAlignedText(pixels, width, 60, conditionText, DARK_GRAY, 2, MARGIN);
 
-  // Hi/Lo
+  // Hi/Lo (right-aligned)
   const hiLoStr = `H:${weather.temperatureHigh} L:${weather.temperatureLow}`;
-  drawText(pixels, width, rightX + 56, 92, hiLoStr, DARK_GRAY, 2);
+  drawRightAlignedText(pixels, width, 92, hiLoStr, DARK_GRAY, 2, MARGIN);
 
   // Weather section bottom border
   drawHLine(pixels, width, weatherSectionHeight, MARGIN, width - MARGIN, INK_BLACK, 3);
