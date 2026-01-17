@@ -2,6 +2,10 @@
 
 Cloudflare Worker that generates a calendar + weather display for [CrossPoint Reader](https://github.com/daveallie/crosspoint-reader) e-ink devices.
 
+<p align="center">
+  <img src="assets/example.png" alt="Example display" width="240">
+</p>
+
 ## Features
 
 - **Live weather** from Open-Meteo API (no API key required)
