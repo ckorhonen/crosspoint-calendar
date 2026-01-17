@@ -1,0 +1,8 @@
+name = "crosspoint-calendar"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+account_id = "ea76e5b24c115e61c4ca83acb28b7e4d"
+
+[vars]
+DISPLAY_WIDTH = "480"
+DISPLAY_HEIGHT = "800"
