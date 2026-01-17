@@ -9,8 +9,10 @@ env/
 # Output
 /tmp/
 *.bmp
-*.png
 output/
+
+# Allow assets
+!assets/*.png
 
 # IDE
 .vscode/
