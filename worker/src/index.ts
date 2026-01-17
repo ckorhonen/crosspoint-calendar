@@ -12,6 +12,7 @@ export interface Env {
   DISPLAY_HEIGHT: string;
   GOOGLE_CALENDAR_API_KEY?: string;
   GOOGLE_CALENDAR_ID?: string;
+  VISUAL_CROSSING_API_KEY?: string;
 }
 
 // Weather data from Open-Meteo API
@@ -72,12 +73,94 @@ const WMO_CODES: { [key: number]: string } = {
   99: 'Severe Thunderstorm',
 };
 
-// Cache key for weather data
-const WEATHER_CACHE_KEY = 'https://crosspoint-calendar.internal/weather-cache';
+// Cache key for weather data (v2 to reset after adding fallback)
+const WEATHER_CACHE_KEY = 'https://crosspoint-calendar.internal/weather-cache-v2';
 const WEATHER_CACHE_TTL = 15 * 60; // 15 minutes in seconds
 const WEATHER_ERROR_CACHE_TTL = 5 * 60; // 5 minutes for errors (backoff)
 
-async function fetchWeather(): Promise<WeatherData> {
+// Visual Crossing condition to WMO code mapping
+const VC_TO_WMO: { [key: string]: number } = {
+  'clear-day': 0,
+  'clear-night': 0,
+  'partly-cloudy-day': 2,
+  'partly-cloudy-night': 2,
+  'cloudy': 3,
+  'fog': 45,
+  'wind': 3,
+  'rain': 63,
+  'showers-day': 80,
+  'showers-night': 80,
+  'snow': 73,
+  'snow-showers-day': 85,
+  'snow-showers-night': 85,
+  'thunder-rain': 95,
+  'thunder-showers-day': 95,
+  'thunder-showers-night': 95,
+  'hail': 96,
+};
+
+async function fetchWeatherFromOpenMeteo(): Promise<WeatherData> {
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${BROOKLYN_LAT}&longitude=${BROOKLYN_LON}&current=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min&temperature_unit=fahrenheit&timezone=${encodeURIComponent(TIMEZONE)}&forecast_days=1`;
+
+  const response = await fetch(url, {
+    headers: {
+      'User-Agent': 'CrossPointCalendar/1.0 (e-ink display; https://github.com/ckorhonen/crosspoint-calendar)',
+    },
+  });
+  if (!response.ok) {
+    console.error(`Open-Meteo HTTP error: ${response.status} ${response.statusText}`);
+    throw new Error(`Open-Meteo error: ${response.status}`);
+  }
+
+  const data = await response.json() as {
+    current: { temperature_2m: number; weather_code: number };
+    daily: { temperature_2m_max: number[]; temperature_2m_min: number[] };
+  };
+
+  return {
+    temperature: Math.round(data.current.temperature_2m),
+    temperatureHigh: Math.round(data.daily.temperature_2m_max[0]),
+    temperatureLow: Math.round(data.daily.temperature_2m_min[0]),
+    condition: WMO_CODES[data.current.weather_code] || 'Unknown',
+    conditionCode: data.current.weather_code,
+  };
+}
+
+async function fetchWeatherFromVisualCrossing(apiKey: string): Promise<WeatherData> {
+  const location = `${BROOKLYN_LAT},${BROOKLYN_LON}`;
+  const url = `https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/${location}/today?unitGroup=us&include=current,days&key=${apiKey}&contentType=json`;
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    console.error(`Visual Crossing HTTP error: ${response.status} ${response.statusText}`);
+    throw new Error(`Visual Crossing error: ${response.status}`);
+  }
+
+  const data = await response.json() as {
+    currentConditions: {
+      temp: number;
+      conditions: string;
+      icon: string;
+    };
+    days: Array<{
+      tempmax: number;
+      tempmin: number;
+    }>;
+  };
+
+  const icon = data.currentConditions.icon || '';
+  const conditionCode = VC_TO_WMO[icon] ?? 3; // Default to overcast if unknown
+
+  return {
+    temperature: Math.round(data.currentConditions.temp),
+    temperatureHigh: Math.round(data.days[0].tempmax),
+    temperatureLow: Math.round(data.days[0].tempmin),
+    condition: data.currentConditions.conditions || 'Unknown',
+    conditionCode,
+  };
+}
+
+async function fetchWeather(env: Env): Promise<WeatherData> {
   // Try to get from cache first
   const cache = caches.default;
   const cachedResponse = await cache.match(WEATHER_CACHE_KEY);
@@ -88,33 +171,30 @@ async function fetchWeather(): Promise<WeatherData> {
     return cached;
   }
 
+  let weatherData: WeatherData | null = null;
+
+  // Try Open-Meteo first
   try {
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${BROOKLYN_LAT}&longitude=${BROOKLYN_LON}&current=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min&temperature_unit=fahrenheit&timezone=${encodeURIComponent(TIMEZONE)}&forecast_days=1`;
+    console.log('Trying Open-Meteo...');
+    weatherData = await fetchWeatherFromOpenMeteo();
+    console.log('Open-Meteo succeeded');
+  } catch (error) {
+    console.error('Open-Meteo failed:', error);
 
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent': 'CrossPointCalendar/1.0 (e-ink display; https://github.com/ckorhonen/crosspoint-calendar)',
-      },
-    });
-    if (!response.ok) {
-      console.error(`Weather API HTTP error: ${response.status} ${response.statusText}`);
-      throw new Error(`Weather API error: ${response.status}`);
+    // Try Visual Crossing as fallback
+    if (env.VISUAL_CROSSING_API_KEY) {
+      try {
+        console.log('Trying Visual Crossing fallback...');
+        weatherData = await fetchWeatherFromVisualCrossing(env.VISUAL_CROSSING_API_KEY);
+        console.log('Visual Crossing succeeded');
+      } catch (vcError) {
+        console.error('Visual Crossing also failed:', vcError);
+      }
     }
+  }
 
-    const data = await response.json() as {
-      current: { temperature_2m: number; weather_code: number };
-      daily: { temperature_2m_max: number[]; temperature_2m_min: number[] };
-    };
-
-    const weatherData: WeatherData = {
-      temperature: Math.round(data.current.temperature_2m),
-      temperatureHigh: Math.round(data.daily.temperature_2m_max[0]),
-      temperatureLow: Math.round(data.daily.temperature_2m_min[0]),
-      condition: WMO_CODES[data.current.weather_code] || 'Unknown',
-      conditionCode: data.current.weather_code,
-    };
-
-    // Cache the weather data
+  // If we got weather data, cache and return it
+  if (weatherData) {
     const cacheResponse = new Response(JSON.stringify(weatherData), {
       headers: {
         'Content-Type': 'application/json',
@@ -123,31 +203,29 @@ async function fetchWeather(): Promise<WeatherData> {
     });
     await cache.put(WEATHER_CACHE_KEY, cacheResponse);
     console.log('Cached fresh weather data');
-
     return weatherData;
-  } catch (error) {
-    console.error('Weather fetch error:', error);
-
-    // Cache the error state to prevent hammering the API
-    const errorData: WeatherData = {
-      temperature: 0,
-      temperatureHigh: 0,
-      temperatureLow: 0,
-      condition: 'Unavailable',
-      conditionCode: -1,
-    };
-
-    const errorCacheResponse = new Response(JSON.stringify(errorData), {
-      headers: {
-        'Content-Type': 'application/json',
-        'Cache-Control': `public, max-age=${WEATHER_ERROR_CACHE_TTL}`,
-      },
-    });
-    await cache.put(WEATHER_CACHE_KEY, errorCacheResponse);
-    console.log('Cached error state for backoff');
-
-    return errorData;
   }
+
+  // Both failed - cache error state
+  console.error('All weather sources failed');
+  const errorData: WeatherData = {
+    temperature: 0,
+    temperatureHigh: 0,
+    temperatureLow: 0,
+    condition: 'Unavailable',
+    conditionCode: -1,
+  };
+
+  const errorCacheResponse = new Response(JSON.stringify(errorData), {
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': `public, max-age=${WEATHER_ERROR_CACHE_TTL}`,
+    },
+  });
+  await cache.put(WEATHER_CACHE_KEY, errorCacheResponse);
+  console.log('Cached error state for backoff');
+
+  return errorData;
 }
 
 const DAY_NAMES = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'];
@@ -779,7 +857,7 @@ export default {
 
     // Fetch data in parallel
     const [weather, days] = await Promise.all([
-      fetchWeather(),
+      fetchWeather(env),
       fetchCalendarEvents(env),
     ]);
 
