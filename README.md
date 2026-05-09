@@ -87,3 +87,7 @@ The worker generates BMPs entirely in-memory using a custom bitmap font renderer
 ## License
 
 MIT
+
+## Agent Workflow
+
+See [AGENTS.md](./AGENTS.md) for repo-specific development and agent instructions.
